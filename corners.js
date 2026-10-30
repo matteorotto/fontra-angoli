@@ -697,7 +697,17 @@ class AngoliPlugin {
     this.panel.setup(this, `${pluginPath}/icon.svg`);
     editor.addSidebarPanel(this.panel, "right");
     const tab = document.querySelector(`.sidebar-tab[data-sidebar-name="${PANEL_ID}"]`);
-    if (tab) tab.title = "Angoli";
+    this.tab = tab;
+    if (tab) {
+      tab.title = "Angoli";
+      // Fontra non avvisa il pannello quando viene nascosto passando a un'altra
+      // scheda: osserviamo direttamente lo stato "selected" della scheda.
+      new MutationObserver(() => this.setPanelOpen(this.isPanelVisible())).observe(tab, {
+        attributes: true,
+        attributeFilter: ["class"],
+      });
+    }
+    this.panelOpen = this.isPanelVisible();
 
     this.registerPreviewLayer();
 
@@ -719,8 +729,14 @@ class AngoliPlugin {
     this.scheduleUpdate();
   }
 
+  isPanelVisible() {
+    return !!this.tab?.classList.contains("selected");
+  }
+
   setPanelOpen(on) {
-    this.panelOpen = on;
+    const open = !!on && this.isPanelVisible();
+    if (open === this.panelOpen) return;
+    this.panelOpen = open;
     this.scheduleUpdate();
   }
 
@@ -908,7 +924,7 @@ class AngoliPlugin {
   }
 
   drawPreview({ context, positionedGlyph, parameters }) {
-    if (!this.panelOpen || !this.settings.preview || this.busy) return;
+    if (!this.isPanelVisible() || !this.settings.preview || this.busy) return;
     const path = positionedGlyph?.glyph?.path;
     if (!path) return;
     let corners, newContours;
