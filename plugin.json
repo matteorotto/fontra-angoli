@@ -1,0 +1,7 @@
+{
+  "name": "Angoli",
+  "description": "Arrotonda e smussa gli angoli dei contorni, con anteprima live e supporto multi-master.",
+  "version": "1.0.0",
+  "init": "corners.js",
+  "function": "start"
+}
