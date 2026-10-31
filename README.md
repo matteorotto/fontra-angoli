@@ -20,6 +20,10 @@ Pannello per arrotondare e smussare gli angoli dei contorni in Fontra, con antep
 - Cambiare il raggio **non aggiunge né toglie punti**: sposta solo quelli del raccordo, e le maniglie del lato vicino se è una curva. I master restano compatibili.
 - **Pallini sul canvas**: con il pannello aperto, dentro ogni angolo coinvolto compare un pallino. Trascinalo verso l'interno per aumentare il raggio, verso lo spigolo per ridurlo. **Maiusc** = passi da 5, **Esc** = annulla il trascinamento. Mentre trascini vedi il risultato in anteprima; la modifica viene applicata quando rilasci.
 - **Mantieni la tensione** (attivo di serie): cambiando il raggio di un angolo già arrotondato, la sua tensione resta quella che aveva. Se lo spegni, viene usata quella del pannello.
+- Dopo **Applica** gli angoli restano selezionati: puoi continuare a cambiarne il raggio con lo slider, il campo numerico o i pallini, senza riselezionarli.
+- **Slider adattivo**: il fondo scala è il raggio massimo utile per gli angoli selezionati, cioè quello oltre il quale il raccordo occuperebbe tutto lo spazio sui lati. Il valore è indicato sotto lo slider. La scala è progressiva, quindi precisa sui raggi piccoli ma in grado di arrivare fino in fondo. Nel campo numerico puoi scrivere qualsiasi valore.
+- I **pallini** hanno una sensibilità costante anche sugli angoli molto aperti, e si fermano al massimo utile. Durante il trascinamento compare "(massimo)".
+- Gli angoli arrotondati con "Coordinate intere" vengono riconosciuti anche quando sono piccolissimi o su diagonali, dove l'arrotondamento dei numeri inclina un po' le maniglie.
 
 ## Master e interpolazione
 

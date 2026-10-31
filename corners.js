@@ -425,7 +425,14 @@ function selectedPointIndices(selection) {
 }
 
 export function targetCorners(path, selection, settings) {
-  let corners = findCorners(path);
+  // le estremità di un raccordo non sono angoli vivi, anche se con le
+  // coordinate intere il raccordo non è perfettamente tangente
+  const filletEnds = new Set();
+  for (const f of findFillets(path)) {
+    filletEnds.add(f.abs[0]);
+    filletEnds.add(f.abs[3]);
+  }
+  let corners = findCorners(path).filter((c) => !filletEnds.has(c.abs));
   if (settings.scope === "selection") {
     const sel = selectedPointIndices(selection);
     corners = corners.filter((c) => sel.has(c.abs));
@@ -484,6 +491,11 @@ function intersectLines(p, d, q, e) {
   return add(p, mul(d, t));
 }
 
+// Segmento lungo zero (tratto dritto o curva con tutti i punti sovrapposti)
+function isDegenerateSegment(P) {
+  return P.every((q) => vlen(sub(q, P[0])) < COLLAPSED_TOL);
+}
+
 function isCollapsedFillet(F) {
   return (
     vlen(sub(F[3], F[0])) < COLLAPSED_TOL &&
@@ -519,8 +531,8 @@ function filletGeometry(info, k, strict) {
   const [A, h1, h2, B] = F;
   // Se il lato vicino è un tratto dritto lungo zero (due raccordi che si
   // toccano, es. una testa semicircolare) usiamo la tangente del raccordo stesso.
-  const degenerateIn = sIn.kind === "line" && vlen(sub(Pin[1], Pin[0])) < COLLAPSED_TOL;
-  const degenerateOut = sOut.kind === "line" && vlen(sub(Pout[1], Pout[0])) < COLLAPSED_TOL;
+  const degenerateIn = isDegenerateSegment(Pin);
+  const degenerateOut = isDegenerateSegment(Pout);
   const dirIn = (!degenerateIn && endTangent(Pin)) || norm(sub(h1, A)) || norm(sub(h2, A));
   const dirOut = (!degenerateOut && startTangent(Pout)) || norm(sub(B, h2)) || norm(sub(B, h1));
   if (!dirIn || !dirOut) return null;
@@ -565,14 +577,23 @@ function filletGeometry(info, k, strict) {
   if (strict) {
     if (phi < FILLET_MIN_ANGLE || phi > FILLET_MAX_ANGLE) return null;
     if (!collapsed) {
+      // Con coordinate intere le maniglie corte risultano un po' inclinate:
+      // la tolleranza cresce quando la maniglia è corta (errore di ±0,5 unità).
+      const l1 = vlen(sub(h1, A));
+      const l2 = vlen(sub(B, h2));
+      const tiny = vlen(sub(B, A)) < 3; // raccordo minuscolo: le direzioni non sono affidabili
       const t1 = norm(sub(h1, A)) || norm(sub(h2, A));
       const t2 = norm(sub(B, h2)) || norm(sub(B, h1));
-      if (!t1 || !t2) return null;
-      if (angleBetween(dirIn, t1) > FILLET_TANGENT_TOL) return null;
-      if (angleBetween(t2, dirOut) > FILLET_TANGENT_TOL) return null;
-      if (dA < -0.5 || dB < -0.5) return null;
-      if (vlen(sub(h1, A)) > dA + 1 || vlen(sub(h2, B)) > dB + 1) return null;
-      const lo = Math.max(Math.min(dA, dB), 0.5);
+      if (!tiny) {
+        if (!t1 || !t2) return null;
+        const tol1 = FILLET_TANGENT_TOL + Math.atan(1.2 / Math.max(l1 || vlen(sub(h2, A)), 0.5));
+        const tol2 = FILLET_TANGENT_TOL + Math.atan(1.2 / Math.max(l2 || vlen(sub(B, h1)), 0.5));
+        if (angleBetween(dirIn, t1) > tol1) return null;
+        if (angleBetween(t2, dirOut) > tol2) return null;
+      }
+      if (dA < -1.5 || dB < -1.5) return null;
+      if (l1 > dA + 2 || l2 > dB + 2) return null;
+      const lo = Math.max(Math.min(dA, dB), 1.5);
       if (Math.max(dA, dB) / lo > 3) return null; // troppo asimmetrico per essere un raccordo
       // almeno un lato dritto: evita di scambiare per angoli le normali curve
       if (sIn.kind !== "line" && sOut.kind !== "line") return null;
@@ -690,7 +711,7 @@ function subCubic(P, a, b) {
 }
 
 // Parametro t (anche fuori da 0…1) in cui il polinomio della curva passa per V
-function findParamFor(P, V, lo, hi) {
+function findParamFor(P, V, lo, hi, tol = 2) {
   const N = 600;
   let bestT = null;
   let bestD = Infinity;
@@ -711,7 +732,14 @@ function findParamFor(P, V, lo, hi) {
     else a = m1;
   }
   const t = (a + b) / 2;
-  return vlen(sub(cubicPoint(P, t), V)) < 2 ? t : null;
+  return vlen(sub(cubicPoint(P, t), V)) < tol ? t : null;
+}
+
+// Tolleranza per ritrovare lo spigolo sul prolungamento di una curva: le
+// coordinate intere spostano un po' il polinomio, e il prolungamento amplifica
+// l'errore tanto più quanto è lungo.
+function extensionTolerance(P, V, endIndex) {
+  return Math.max(3, 0.12 * vlen(sub(V, P[endIndex])));
 }
 
 function arcTable(P, t0, t1, steps = 160) {
@@ -770,7 +798,7 @@ export function refilletContour(contour, filletAIndices, opts) {
     g.d = Math.max(0, opts.radius) * Math.tan(phi / 2);
     g.k = opts.keepTension && Number.isFinite(g.tension) && g.tension > 0 ? g.tension : opts.tension ?? 1;
     // due raccordi attaccati senza un segmento in mezzo: non gestito
-    if (fillets.has(g.kin) || fillets.has(g.kout)) g.bad = true;
+    if (fillets.has(g.kin) || fillets.has(g.kout)) g.bad = "attached";
   }
 
   // segmenti vicini ai raccordi: inizio e/o fine "agganciati" a uno spigolo V
@@ -789,23 +817,25 @@ export function refilletContour(contour, filletAIndices, opts) {
     const P = segmentPoints(info, seg);
     a.seg = seg;
     a.kind = seg.kind;
-    if (seg.kind === "cubic") {
+    // una curva lunga zero (es. un raccordo con raggio 0 accanto) si tratta come un tratto dritto
+    if (seg.kind === "cubic" && isDegenerateSegment(P)) a.kind = "line-degenerate";
+    if (a.kind === "cubic") {
       a.P = P;
       a.t0 = 0;
       a.t1 = 1;
       if (a.start) {
-        const t = findParamFor(P, a.start.V, -6, 0.5);
-        if (t === null) a.start.bad = true;
+        const t = findParamFor(P, a.start.V, -6, 0.5, extensionTolerance(P, a.start.V, 0));
+        if (t === null) a.start.bad = "curve-start";
         else a.t0 = t;
       }
       if (a.end) {
-        const t = findParamFor(P, a.end.V, 0.5, 7);
-        if (t === null) a.end.bad = true;
+        const t = findParamFor(P, a.end.V, 0.5, 7, extensionTolerance(P, a.end.V, 3));
+        if (t === null) a.end.bad = "curve-end";
         else a.t1 = t;
       }
-    } else if (seg.kind !== "line") {
-      if (a.start) a.start.bad = true;
-      if (a.end) a.end.bad = true;
+    } else if (a.kind !== "line" && a.kind !== "line-degenerate") {
+      if (a.start) a.start.bad = "other-seg";
+      if (a.end) a.end.bad = "other-seg";
     }
     a.P = P;
   }
@@ -813,9 +843,9 @@ export function refilletContour(contour, filletAIndices, opts) {
   for (const a of adj.values()) {
     if (a.start?.bad) a.start = null;
     if (a.end?.bad) a.end = null;
-    if (a.kind === "line") {
+    if (a.kind === "line" || a.kind === "line-degenerate") {
       a.p0 = a.start ? a.start.V : a.P[0];
-      a.p1 = a.end ? a.end.V : a.P[1];
+      a.p1 = a.end ? a.end.V : a.P[a.P.length - 1];
       a.L = vlen(sub(a.p1, a.p0));
     } else if (a.kind === "cubic") {
       if (!a.start) a.t0 = 0;
@@ -842,7 +872,7 @@ export function refilletContour(contour, filletAIndices, opts) {
   // ricostruisce i segmenti vicini
   for (const a of adj.values()) {
     if (!a.start && !a.end) continue;
-    if (a.kind === "line") {
+    if (a.kind === "line" || a.kind === "line-degenerate") {
       const dir = norm(sub(a.p1, a.p0));
       if (a.start) {
         a.start.B2 = dir ? add(a.p0, mul(dir, a.start.dEff)) : a.p0;
@@ -872,9 +902,11 @@ export function refilletContour(contour, filletAIndices, opts) {
   // riscrive i raccordi
   let done = 0;
   let skipped = 0;
+  const reasons = [];
   for (const g of fillets.values()) {
     if (g.bad || !g.A2 || !g.B2) {
       skipped++;
+      reasons.push(g.bad || "no-anchor");
       continue;
     }
     const f = handleFactor(g.phi) * g.k;
@@ -893,8 +925,40 @@ export function refilletContour(contour, filletAIndices, opts) {
     }
     done++;
   }
-  if (!done) return { contour: null, skipped };
-  return { contour: { points: out, isClosed: contour.isClosed }, skipped };
+  if (!done) return { contour: null, skipped, reasons };
+  return { contour: { points: out, isClosed: contour.isClosed }, skipped, reasons };
+}
+
+// Raggio massimo "utile" di un angolo: oltre questo valore il raccordo
+// occuperebbe tutto lo spazio disponibile sui lati e non cambierebbe più.
+// target: angolo vivo { ci, li } oppure raccordo { ci, iA }.
+export function cornerMaxRadius(path, target) {
+  const info = analyzeContour(path.getUnpackedContour(target.ci));
+  if (!info) return 0;
+  let phi, capIn, capOut;
+  if (target.iA === undefined) {
+    const j = info.on.indexOf(target.li);
+    const c = j >= 0 ? cornerAt(info, j) : null;
+    if (!c) return 0;
+    phi = c.phi;
+    capIn = segmentLength(segmentPoints(info, info.segments[c.kin]));
+    capOut = segmentLength(segmentPoints(info, info.segments[c.kout]));
+  } else {
+    const k = info.segments.findIndex((seg) => seg.kind === "cubic" && seg.a === target.iA);
+    const g = k >= 0 ? filletGeometry(info, k, false) : null;
+    if (!g) return 0;
+    phi = g.phi;
+    const Pin = segmentPoints(info, info.segments[g.kin]);
+    const Pout = segmentPoints(info, info.segments[g.kout]);
+    capIn = info.segments[g.kin].kind === "line" ? vlen(sub(g.V, Pin[0])) : segmentLength(Pin) + Math.max(0, g.dA);
+    capOut =
+      info.segments[g.kout].kind === "line"
+        ? vlen(sub(Pout[Pout.length - 1], g.V))
+        : segmentLength(Pout) + Math.max(0, g.dB);
+  }
+  const halfTan = Math.tan(Math.min(phi, MAX_ANGLE) / 2);
+  if (halfTan < EPS) return 0;
+  return Math.min(capIn, capOut) / halfTan;
 }
 
 // Applica in un master: prima cambia il raggio dei raccordi esistenti, poi
@@ -1069,9 +1133,10 @@ class AngoliPanel extends HTMLElement {
         <div class="row">
           <div class="label">Raggio</div>
           <div class="slider">
-            <input type="range" min="0" max="300" step="1" data-key="radius" />
+            <input type="range" min="0" max="1000" step="1" data-key="radiusSlider" />
             <input type="number" min="0" step="1" data-key="radius" />
           </div>
+          <div class="hint" id="radius-hint"></div>
         </div>
 
         <div class="row" id="tension-row">
@@ -1135,7 +1200,9 @@ class AngoliPanel extends HTMLElement {
       } else {
         input.addEventListener("input", () => {
           const v = parseFloat(input.value);
-          if (Number.isFinite(v)) plugin.setSetting(key, v);
+          if (!Number.isFinite(v)) return;
+          if (key === "radiusSlider") plugin.setSetting("radius", plugin.sliderToRadius(v));
+          else plugin.setSetting(key, v);
         });
       }
     }
@@ -1155,11 +1222,14 @@ class AngoliPanel extends HTMLElement {
       const value = s[input.dataset.key];
       if (input.type === "checkbox") {
         input.checked = !!value;
+      } else if (input.dataset.key === "radiusSlider") {
+        if (this.shadowRoot.activeElement !== input) input.value = this.plugin.radiusToSlider(s.radius);
       } else if (this.shadowRoot.activeElement !== input) {
         input.value = value;
       }
     }
     this.shadowRoot.querySelector("#tension-row").classList.toggle("hidden", s.mode !== "round");
+    this.shadowRoot.querySelector("#radius-hint").textContent = this.plugin.radiusHint || "";
     this.shadowRoot.querySelector("#masters-hint").textContent = s.allMasters
       ? "Il raggio viene applicato a tutti i master."
       : "Il raggio vale solo per il master su cui ti trovi. Negli altri master i nuovi angoli arrotondati partono con raggio 0 (restano vivi) e li regoli quando ci arrivi.";
@@ -1196,6 +1266,8 @@ class AngoliPlugin {
     this.settings = loadSettings();
     this.panelOpen = false;
     this.busy = false;
+    this.radiusMax = 300; // fondo scala dello slider, adattato agli angoli coinvolti
+    this.radiusHint = "";
 
     this.panel = document.createElement(PANEL_TAG);
     this.panel.setup(this, `${pluginPath}/icon.svg`);
@@ -1232,6 +1304,34 @@ class AngoliPlugin {
     saveSettings(this.settings);
     this.panel.renderSettings(this.settings);
     this.scheduleUpdate();
+  }
+
+  // Slider progressivo: preciso sui raggi piccoli, ma arriva fino al massimo utile
+  sliderToRadius(p) {
+    return Math.round(this.radiusMax * Math.pow(clamp(p, 0, 1000) / 1000, 2));
+  }
+
+  radiusToSlider(r) {
+    return Math.round(1000 * Math.sqrt(clamp(r / this.radiusMax, 0, 1)));
+  }
+
+  updateRadiusRange(path, corners, fillets) {
+    let max = 0;
+    for (const t of [...corners, ...fillets]) {
+      try {
+        max = Math.max(max, cornerMaxRadius(path, t));
+      } catch (e) {
+        // ignora
+      }
+    }
+    max = Math.min(max, 5000);
+    const newMax = max > 0 ? Math.max(20, Math.ceil(max)) : Math.max(300, Math.ceil(this.settings.radius));
+    this.radiusHint = max > 0 ? `Raggio massimo utile per questi angoli: ${Math.floor(max)}` : "";
+    if (newMax !== this.radiusMax || this._lastHint !== this.radiusHint) {
+      this.radiusMax = newMax;
+      this._lastHint = this.radiusHint;
+      this.panel.renderSettings(this.settings);
+    }
   }
 
   isPanelVisible() {
@@ -1287,7 +1387,11 @@ class AngoliPlugin {
 
   updateStatus() {
     if (this.drag) {
-      this.panel.setStatus(`Raggio: ${this.drag.radius}  (rilascia per applicare, Esc per annullare)`);
+      const max = this.drag.widget.rMax > 0 ? Math.ceil(this.drag.widget.rMax) : null;
+      const atMax = max !== null && this.drag.radius >= max;
+      this.panel.setStatus(
+        `Raggio: ${this.drag.radius}${atMax ? " (massimo)" : ""}  · rilascia per applicare, Esc per annullare`
+      );
       return;
     }
     if (this._flash && Date.now() < this._flash.until) {
@@ -1312,6 +1416,7 @@ class AngoliPlugin {
       this.panel.setButtonsEnabled(false, false);
       return;
     }
+    this.updateRadiusRange(path, corners, fillets);
     const total = corners.length + fillets.length;
     const lines = [];
     if (corners.length) {
@@ -1488,7 +1593,21 @@ class AngoliPlugin {
       await new Promise((resolve) => setTimeout(resolve, 30));
       const path = this.getPositionedGlyph()?.glyph?.path;
       if (!path) return;
-      const found = findFillets(path).filter((f) => targetVs.some((v) => vlen(sub(v, f.V)) < 1.5));
+      // con coordinate intere lo spigolo ricalcolato si sposta di poco
+      const all = findFillets(path);
+      const found = [];
+      for (const v of targetVs) {
+        let best = null;
+        let bestD = Infinity;
+        for (const f of all) {
+          const d = vlen(sub(v, f.V));
+          if (d < bestD) {
+            bestD = d;
+            best = f;
+          }
+        }
+        if (best && bestD < Math.max(3, 0.25 * best.radius) && !found.includes(best)) found.push(best);
+      }
       if (found.length >= targetVs.length || attempt === 19) {
         this.sceneController.selection = new Set(found.flatMap((f) => f.abs.map((i) => `point/${i}`)));
         return;
@@ -1612,7 +1731,15 @@ class AngoliPlugin {
       const phi = Math.min(c.phi, MAX_ANGLE);
       // distanza dallo spigolo del punto medio dell'arco, per unità di raggio
       const fac = 1 / Math.cos(phi / 2) - 1;
-      widgets.push({ V: c.V, u, fac: Math.max(fac, 0.02), radius: c.radius, phi });
+      let rMax = 0;
+      try {
+        rMax = cornerMaxRadius(path, c);
+      } catch (e) {
+        rMax = 0;
+      }
+      // sugli angoli molto aperti la distanza reale cambierebbe pochissimo:
+      // un minimo di sensibilità rende il trascinamento controllabile
+      widgets.push({ V: c.V, u, fac: Math.max(fac, 0.12), radius: c.radius, phi, rMax });
     }
     return widgets;
   }
@@ -1673,6 +1800,7 @@ class AngoliPlugin {
         const w = this.drag.widget;
         const s = dot(sub(p, w.V), w.u);
         let r = Math.max(0, (s - 14 / this.drag.mag) / w.fac);
+        if (w.rMax > 0) r = Math.min(r, Math.ceil(w.rMax)); // oltre non cambierebbe niente
         r = event.shiftKey ? Math.round(r / 5) * 5 : Math.round(r);
         r = Math.min(r, 5000);
         if (r !== this.drag.radius) {
