@@ -2,6 +2,7 @@
 // Arrotonda o smussa gli angoli dei contorni, con anteprima live sul canvas.
 // Si installa da Impostazioni → Plugin Manager indicando il repository GitHub.
 
+const VERSION = "1.1.2";
 const PANEL_ID = "corners";
 const PANEL_TAG = "angoli-corner-panel";
 const LAYER_ID = "plugin.angoli.preview";
@@ -1047,6 +1048,7 @@ const PANEL_CSS = `
     overflow: hidden auto;
   }
   .title { font-weight: bold; font-size: 1.05rem; }
+  .ver { font-weight: normal; font-size: 0.75rem; opacity: 0.5; margin-left: 0.4em; }
   .row { display: flex; flex-direction: column; gap: 0.3em; }
   .label { opacity: 0.75; font-size: 0.85rem; }
   .seg {
@@ -1121,7 +1123,7 @@ class AngoliPanel extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>${PANEL_CSS}</style>
       <div class="panel">
-        <div class="title">Angoli</div>
+        <div class="title">Angoli<span class="ver">v${VERSION}</span></div>
 
         <div class="row">
           <div class="seg" data-key="mode">
@@ -1440,12 +1442,33 @@ class AngoliPlugin {
     if (total) {
       text = lines.join(" · ");
     } else if (this.settings.scope === "selection") {
-      text = "Nessun angolo tra i punti selezionati. Seleziona dei nodi d'angolo o usa “Tutto il glifo”.";
+      text = this.explainEmptySelection(path);
     } else {
       text = "Nessun angolo che corrisponda al filtro in questo glifo.";
     }
     this.panel.setStatus(text, !total);
     this.panel.setButtonsEnabled(total > 0 && !this.busy, true);
+  }
+
+  // Spiega perché i punti selezionati non danno nessun angolo da modificare
+  explainEmptySelection(path) {
+    const sel = this.sceneController.selection;
+    if (!sel || !sel.size) {
+      return "Seleziona gli angoli da modificare (anche solo un punto dell'angolo arrotondato), oppure usa “Tutto il glifo”.";
+    }
+    const anyFilter = { ...this.settings, filter: "both", mode: "round" };
+    const corners = targetCorners(path, sel, anyFilter);
+    const fillets = targetFillets(path, sel, anyFilter);
+    if (this.settings.mode === "chamfer" && fillets.length) {
+      return "Tra i punti selezionati ci sono angoli arrotondati, ma in modalità “Smussa” non si modificano: passa ad “Arrotonda”.";
+    }
+    const all = [...corners, ...fillets];
+    if (all.length) {
+      const kind = all.every((c) => c.convex) ? "esterni" : all.every((c) => !c.convex) ? "interni" : "esterni e interni";
+      const filterName = this.settings.filter === "convex" ? "Esterni" : "Interni";
+      return `I punti selezionati sono angoli ${kind}, ma il filtro “${filterName}” li esclude: scegli “Tutti”.`;
+    }
+    return "Nei punti selezionati non riconosco nessun angolo. Seleziona un nodo d'angolo o un punto di un angolo arrotondato (con almeno un lato dritto), oppure usa “Tutto il glifo”.";
   }
 
   selectCorners() {
@@ -1873,5 +1896,6 @@ function traceContour(context, contour) {
 // Punto d'ingresso chiamato da Fontra: module[plugin.json.function](editor, pluginPath)
 export function start(editor, pluginPath) {
   if (editor.__angoliPlugin) return;
+  console.info(`[Angoli] versione ${VERSION} caricata da ${pluginPath}`);
   editor.__angoliPlugin = new AngoliPlugin(editor, pluginPath);
 }
