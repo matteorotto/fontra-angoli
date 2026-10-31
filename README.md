@@ -19,11 +19,16 @@ Pannello per arrotondare e smussare gli angoli dei contorni in Fontra, con antep
 - Seleziona l'angolo arrotondato (basta uno dei suoi punti) e premi **Applica**: cambia solo il raggio. Il pannello mostra il raggio attuale nel master su cui ti trovi.
 - Cambiare il raggio **non aggiunge né toglie punti**: sposta solo quelli del raccordo, e le maniglie del lato vicino se è una curva. I master restano compatibili.
 - **Pallini sul canvas**: con il pannello aperto, dentro ogni angolo coinvolto compare un pallino. Trascinalo verso l'interno per aumentare il raggio, verso lo spigolo per ridurlo. **Maiusc** = passi da 5, **Esc** = annulla il trascinamento. Mentre trascini vedi il risultato in anteprima; la modifica viene applicata quando rilasci.
-- **Mantieni la tensione** (attivo di serie): cambiando il raggio di un angolo già arrotondato, la sua tensione resta quella che aveva. Se lo spegni, viene usata quella del pannello.
+- Quando selezioni angoli già arrotondati, **raggio e tensione nel pannello mostrano i loro valori attuali**. Puoi cambiarli entrambi: se sposti lo slider della tensione, la nuova tensione viene applicata.
+- **Mantieni la tensione** (attivo di serie): finché non tocchi lo slider della tensione, cambiando il raggio ogni angolo conserva la tensione che aveva, anche se gli angoli selezionati hanno tensioni diverse.
 - Dopo **Applica** gli angoli restano selezionati: puoi continuare a cambiarne il raggio con lo slider, il campo numerico o i pallini, senza riselezionarli.
 - **Slider adattivo**: il fondo scala è il raggio massimo utile per gli angoli selezionati, cioè quello oltre il quale il raccordo occuperebbe tutto lo spazio sui lati. Il valore è indicato sotto lo slider. La scala è progressiva, quindi precisa sui raggi piccoli ma in grado di arrivare fino in fondo. Nel campo numerico puoi scrivere qualsiasi valore.
 - I **pallini** hanno una sensibilità costante anche sugli angoli molto aperti, e si fermano al massimo utile. Durante il trascinamento compare "(massimo)".
 - Gli angoli arrotondati con "Coordinate intere" vengono riconosciuti anche quando sono piccolissimi o su diagonali, dove l'arrotondamento dei numeri inclina un po' le maniglie.
+
+## Cosa viene salvato nel file
+
+Sulle maniglie dei raccordi che crea, il plugin salva alcuni attributi invisibili: raggio, tensione, posizione dello spigolo originale e, per i lati curvi accorciati, la loro forma intera. Fontra li conserva nel file `.fontra` e non influiscono sull'esportazione. Servono a riconoscere sempre gli angoli e a rendere ogni modifica reversibile. Per esempio, anche con coordinate intere e lati bombati, riportare il raggio a 0 restituisce esattamente la forma di partenza.
 
 ## Master e interpolazione
 
@@ -55,7 +60,7 @@ Modifica i file su GitHub e crea una nuova release (`v1.0.1`, …). jsDelivr tie
 - Lavora sui contorni, non sui componenti. Per arrotondare un componente devi prima scomporlo.
 - Le curve quadratiche (TrueType) non sono supportate. Gli angoli adiacenti a curve quadratiche vengono ignorati.
 - Se due contorni si sovrappongono, vengono arrotondati anche gli angoli nascosti nella sovrapposizione. Unisci i contorni prima di applicare.
-- Una curva tra due lati entrambi curvi non viene considerata un angolo arrotondato: sarebbe impossibile distinguerla da una curva normale.
+- Gli angoli tra **due lati curvi** (per esempio una controforma con i lati leggermente bombati) funzionano se li hai arrotondati con il plugin. Tra due curve, un raccordo disegnato a mano viene riconosciuto solo se è piccolo rispetto alle curve vicine, così le curve normali (come i quarti di un cerchio) non vengono scambiate per angoli.
 - Due angoli arrotondati attaccati, senza un tratto in mezzo, non si possono regolare. Una testa semicircolare invece sì, perché il tratto in mezzo esiste, anche se è lungo zero.
 - Se un raggio è più grande dello spazio disponibile, viene ridotto. Il raggio letto in seguito è quello reale, non quello richiesto.
 - I master con una struttura diversa da quello corrente vengono saltati, e il pannello te lo segnala.

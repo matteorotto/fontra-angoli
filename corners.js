@@ -2,7 +2,7 @@
 // Arrotonda o smussa gli angoli dei contorni, con anteprima live sul canvas.
 // Si installa da Impostazioni → Plugin Manager indicando il repository GitHub.
 
-const VERSION = "1.1.2";
+const VERSION = "1.2.0";
 const PANEL_ID = "corners";
 const PANEL_TAG = "angoli-corner-panel";
 const LAYER_ID = "plugin.angoli.preview";
@@ -333,6 +333,7 @@ export function roundContour(contour, cornerIndices, opts) {
     return { P, d0, d1, T: trimSegment(P, d0, d1) };
   });
 
+  let cornerMap = null;
   const out = [];
   for (let k = 0; k < segments.length; k++) {
     const seg = segments[k];
@@ -349,7 +350,16 @@ export function roundContour(contour, cornerIndices, opts) {
 
     if (seg.kind === "cubic") {
       const changed = segData[k].d0 > EPS || segData[k].d1 > EPS;
-      out.push(makePoint(T[1], "cubic", false, pts[seg.offs[0]].attrs, changed, rc));
+      let attrs1 = pts[seg.offs[0]].attrs;
+      if (changed && isRound) {
+        // lato curvo accorciato: salviamo la sua forma intera (vedi fullSide)
+        if (!cornerMap) cornerMap = contourCornerMap(info);
+        const P = segData[k].P;
+        const S = segData[k].d0 > EPS ? P[0] : cornerMap.get(seg.a) ?? P[0];
+        const E = segData[k].d1 > EPS ? P[3] : cornerMap.get(seg.b) ?? P[3];
+        attrs1 = { ...(attrs1 || {}), ...sideAttrs(fullSide(P, S, E, attrs1)) };
+      }
+      out.push(makePoint(T[1], "cubic", false, attrs1, changed, rc));
       out.push(makePoint(T[2], "cubic", false, pts[seg.offs[1]].attrs, changed, rc));
     } else {
       for (const i of seg.offs) {
@@ -370,8 +380,12 @@ export function roundContour(contour, cornerIndices, opts) {
         const f = handleFactor(c.phi) * (opts.tension ?? 1);
         const h1 = add(S1, mul(dirIn, segData[k].d1 * f));
         const h2 = sub(S2, mul(dirOut, next.d0 * f));
-        out.push(makePoint(h1, "cubic", false, null, true, rc));
-        out.push(makePoint(h2, "cubic", false, null, true, rc));
+        const rApplied = c.d / Math.tan(Math.min(c.phi, MAX_ANGLE) / 2);
+        const cornerV = xy(pts[on[seg.endOn]]);
+        const A1 = { x: roundValue(S1.x, rc), y: roundValue(S1.y, rc) };
+        const attrs = tagAttrs(rApplied, opts.tension ?? 1, cornerV, A1, c.phi);
+        out.push(makePoint(h1, "cubic", false, attrs, true, rc));
+        out.push(makePoint(h2, "cubic", false, { ...attrs }, true, rc));
       }
     }
   }
@@ -476,6 +490,24 @@ export function computeRoundedContours(path, byContour, opts) {
 // ---------------------------------------------------------------------------
 
 const FILLET_TANGENT_TOL = (3 * Math.PI) / 180;
+// Contrassegno invisibile (attributo del punto, salvato nel file) sulle maniglie
+// dei raccordi creati dal plugin: li riconosce sempre, anche tra due curve.
+const FILLET_TAG = "angoli";
+// Nel contrassegno salviamo anche raggio e tensione applicati: con coordinate
+// intere e lati curvi la misura geometrica può scostarsi di qualche unità.
+// Salviamo anche lo spigolo originale V, come scostamento dal nodo A (così
+// resta valido se il glifo viene spostato), e l'angolo di svolta in gradi.
+function tagAttrs(radius, tension, V, A, phi) {
+  const attrs = { [FILLET_TAG]: 1 };
+  if (Number.isFinite(radius)) attrs[`${FILLET_TAG}.r`] = Math.round(radius * 10) / 10;
+  if (Number.isFinite(tension)) attrs[`${FILLET_TAG}.t`] = Math.round(tension * 100) / 100;
+  if (V && A) {
+    attrs[`${FILLET_TAG}.dx`] = Math.round((V.x - A.x) * 100) / 100;
+    attrs[`${FILLET_TAG}.dy`] = Math.round((V.y - A.y) * 100) / 100;
+  }
+  if (Number.isFinite(phi)) attrs[`${FILLET_TAG}.a`] = Math.round(((phi * 180) / Math.PI) * 100) / 100;
+  return attrs;
+}
 const FILLET_MIN_ANGLE = (5 * Math.PI) / 180;
 const FILLET_MAX_ANGLE = (175 * Math.PI) / 180;
 const COLLAPSED_TOL = 0.5;
@@ -546,10 +578,17 @@ function filletGeometry(info, k, strict) {
   let cornerIn = dirIn;
   let cornerOut = dirOut;
   let dA, dB;
+  const storedAttrs = info.pts[seg.offs[0]].attrs || {};
+  const storedV = storedCorner(storedAttrs, A, B, dirIn, dirOut);
   if (collapsed) {
     V = lerp(A, B, 0.5);
     dA = 0;
     dB = 0;
+  } else if (storedV) {
+    // spigolo salvato dal plugin: più affidabile del prolungamento delle curve
+    V = storedV;
+    dA = vlen(sub(V, A));
+    dB = vlen(sub(B, V));
   } else {
     V = intersectLines(A, dirIn, B, dirOut);
     if (!V) return null;
@@ -571,11 +610,31 @@ function filletGeometry(info, k, strict) {
         dB = arcTable(Pout, t, 0).total;
         dA = dot(sub(V, A), dirIn);
       }
+    } else if (sIn.kind === "cubic" && sOut.kind === "cubic" && !degenerateIn && !degenerateOut) {
+      // due lati curvi: lo spigolo è dove si incontrano i prolungamenti delle due curve
+      const cc = curveCurveCorner(Pin, Pout, V);
+      if (cc) {
+        V = cc.V;
+        cornerIn = cubicTangent(Pin, cc.t) || dirIn;
+        cornerOut = cubicTangent(Pout, cc.s) || dirOut;
+        dA = arcTable(Pin, 1, cc.t).total;
+        dB = arcTable(Pout, cc.s, 0).total;
+      }
     }
   }
-  const phi = angleBetween(cornerIn, cornerOut);
+  const storedPhi = storedAttrs[`${FILLET_TAG}.a`];
+  const phi =
+    (storedV || collapsed) && Number.isFinite(storedPhi)
+      ? (storedPhi * Math.PI) / 180
+      : angleBetween(cornerIn, cornerOut);
+
+  const tagged = !!(info.pts[seg.offs[0]].attrs?.[FILLET_TAG] || info.pts[seg.offs[1]].attrs?.[FILLET_TAG]);
 
   if (strict) {
+    // un lato curvo salvato dal plugin (anche se ridotto a lunghezza zero) non è un raccordo
+    if (Number.isFinite(info.pts[seg.offs[0]].attrs?.[`${FILLET_TAG}.s1x`])) return null;
+    // un raccordo "chiuso" senza contrassegno accanto a lati curvi è ambiguo
+    if (collapsed && !tagged && (sIn.kind !== "line" || sOut.kind !== "line")) return null;
     if (phi < FILLET_MIN_ANGLE || phi > FILLET_MAX_ANGLE) return null;
     if (!collapsed) {
       // Con coordinate intere le maniglie corte risultano un po' inclinate:
@@ -587,33 +646,106 @@ function filletGeometry(info, k, strict) {
       const t2 = norm(sub(B, h2)) || norm(sub(B, h1));
       if (!tiny) {
         if (!t1 || !t2) return null;
-        const tol1 = FILLET_TANGENT_TOL + Math.atan(1.2 / Math.max(l1 || vlen(sub(h2, A)), 0.5));
-        const tol2 = FILLET_TANGENT_TOL + Math.atan(1.2 / Math.max(l2 || vlen(sub(B, h1)), 0.5));
+        const extra = tagged ? (10 * Math.PI) / 180 : 0;
+        const tol1 = FILLET_TANGENT_TOL + extra + Math.atan(1.2 / Math.max(l1 || vlen(sub(h2, A)), 0.5));
+        const tol2 = FILLET_TANGENT_TOL + extra + Math.atan(1.2 / Math.max(l2 || vlen(sub(B, h1)), 0.5));
         if (angleBetween(dirIn, t1) > tol1) return null;
         if (angleBetween(t2, dirOut) > tol2) return null;
       }
       if (dA < -1.5 || dB < -1.5) return null;
       if (l1 > dA + 2 || l2 > dB + 2) return null;
       const lo = Math.max(Math.min(dA, dB), 1.5);
-      if (Math.max(dA, dB) / lo > 3) return null; // troppo asimmetrico per essere un raccordo
-      // almeno un lato dritto: evita di scambiare per angoli le normali curve
-      if (sIn.kind !== "line" && sOut.kind !== "line") return null;
+      if (!tagged && Math.max(dA, dB) / lo > 3) return null; // troppo asimmetrico per essere un raccordo
+      // Due lati curvi e nessun contrassegno: lo accettiamo solo se è piccolo
+      // rispetto alle curve vicine e ha la forma di un raccordo, così le curve
+      // normali (es. i quarti di un cerchio) non diventano "angoli".
+      if (!tagged && sIn.kind !== "line" && sOut.kind !== "line") {
+        // il lato rimasto tra due raccordi del plugin non è a sua volta un raccordo
+        const isTaggedSeg = (sg) => sg.kind === "cubic" && sg.offs.some((i) => info.pts[i].attrs?.[FILLET_TAG]);
+        if (isTaggedSeg(sIn) || isTaggedSeg(sOut)) return null;
+        const near = Math.min(segmentLength(Pin), segmentLength(Pout));
+        if (Math.max(dA, dB) > 0.35 * near) return null;
+        const ratio = ((dA > EPS ? l1 / dA : 0) + (dB > EPS ? l2 / dB : 0)) / 2 / handleFactor(phi);
+        if (ratio < 0.5 || ratio > 1.7) return null;
+      }
     }
   }
 
   const d = Math.max(0, (dA + dB) / 2);
   const halfTan = Math.tan(Math.min(phi, MAX_ANGLE) / 2);
-  const radius = halfTan > EPS ? d / halfTan : 0;
+  let radius = halfTan > EPS ? d / halfTan : 0;
   let tension = null;
   if (!collapsed && dA > EPS && dB > EPS) {
     const ratio = (vlen(sub(h1, A)) / dA + vlen(sub(h2, B)) / dB) / 2;
     tension = ratio / handleFactor(phi);
   }
+  // valori salvati nel contrassegno: li usiamo se la forma non è stata
+  // cambiata a mano (misura vicina a quanto salvato)
+  const stored = info.pts[seg.offs[0]].attrs || {};
+  const rStored = stored[`${FILLET_TAG}.r`];
+  const tStored = stored[`${FILLET_TAG}.t`];
+  if (Number.isFinite(rStored) && Math.abs(radius - rStored) <= Math.max(2, 0.15 * rStored)) radius = rStored;
+  if (Number.isFinite(tStored) && tension !== null && Math.abs(tension - tStored) <= 0.15) tension = tStored;
   return {
-    k, kin, kout, V, dirIn, dirOut, cornerIn, cornerOut, phi, dA, dB, radius, tension, collapsed,
+    k, kin, kout, V, dirIn, dirOut, cornerIn, cornerOut, phi, dA, dB, radius, tension, collapsed, tagged,
     iA: seg.a, ih1: seg.offs[0], ih2: seg.offs[1], iB: seg.b,
     cross: cross(cornerIn, cornerOut),
   };
+}
+
+// Parametro del punto del polinomio (anche prolungato) più vicino a V
+function nearestParam(P, V, lo, hi) {
+  const N = 300;
+  let bestT = lo;
+  let bestD = Infinity;
+  for (let i = 0; i <= N; i++) {
+    const t = lo + ((hi - lo) * i) / N;
+    const d = vlen(sub(cubicPoint(P, t), V));
+    if (d < bestD) {
+      bestD = d;
+      bestT = t;
+    }
+  }
+  let a = Math.max(lo, bestT - (hi - lo) / N);
+  let b = Math.min(hi, bestT + (hi - lo) / N);
+  for (let i = 0; i < 40; i++) {
+    const m1 = a + (b - a) / 3;
+    const m2 = b - (b - a) / 3;
+    if (vlen(sub(cubicPoint(P, m1), V)) < vlen(sub(cubicPoint(P, m2), V))) b = m2;
+    else a = m1;
+  }
+  return (a + b) / 2;
+}
+
+// Incrocio tra il prolungamento della curva che arriva (oltre t=1) e quello
+// della curva che riparte (prima di t=0), partendo da una stima V0
+function curveCurveCorner(Pin, Pout, V0) {
+  let t = nearestParam(Pin, V0, 1, 5);
+  let s = nearestParam(Pout, V0, -4, 0);
+  for (let i = 0; i < 40; i++) {
+    s = nearestParam(Pout, cubicPoint(Pin, t), -4, 0);
+    t = nearestParam(Pin, cubicPoint(Pout, s), 1, 5);
+  }
+  const p = cubicPoint(Pin, t);
+  const q = cubicPoint(Pout, s);
+  const gap = vlen(sub(p, q));
+  const scale = Math.max(vlen(sub(V0, Pin[3])), vlen(sub(V0, Pout[0])), 1);
+  if (gap > Math.max(4, 0.25 * scale)) return null;
+  return { V: lerp(p, q, 0.5), t, s };
+}
+
+// Spigolo salvato nel contrassegno, se è ancora coerente con la forma attuale
+// (stesso lato del nodo A e del nodo B, vicino alle loro tangenti)
+function storedCorner(attrs, A, B, dirIn, dirOut) {
+  const dx = attrs[`${FILLET_TAG}.dx`];
+  const dy = attrs[`${FILLET_TAG}.dy`];
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) return null;
+  const V = { x: A.x + dx, y: A.y + dy };
+  const tol = Math.max(2, 0.12 * (vlen(sub(V, A)) + vlen(sub(B, V))));
+  if (Math.abs(cross(dirIn, sub(V, A))) > tol) return null;
+  if (Math.abs(cross(dirOut, sub(B, V))) > tol) return null;
+  if (dot(sub(V, A), dirIn) < -1 || dot(sub(B, V), dirOut) < -1) return null;
+  return V;
 }
 
 function cubicTangent(P, t) {
@@ -675,6 +807,7 @@ export function findFillets(path) {
           radius: g.radius,
           tension: g.tension,
           collapsed: g.collapsed,
+          tagged: g.tagged,
           V: g.V,
           dirIn: g.cornerIn,
           dirOut: g.cornerOut,
@@ -740,7 +873,9 @@ function findParamFor(P, V, lo, hi, tol = 2) {
 // coordinate intere spostano un po' il polinomio, e il prolungamento amplifica
 // l'errore tanto più quanto è lungo.
 function extensionTolerance(P, V, endIndex) {
-  return Math.max(3, 0.12 * vlen(sub(V, P[endIndex])));
+  // un tratto corto che ha perso la sua leggera curvatura con le coordinate
+  // intere, prolungato, passa a qualche unità dallo spigolo: lo accettiamo
+  return Math.max(4, 0.3 * vlen(sub(V, P[endIndex])));
 }
 
 function arcTable(P, t0, t1, steps = 160) {
@@ -775,6 +910,114 @@ function tAtArc(table, s) {
   return ts[lo] + (ts[hi] - ts[lo]) * f;
 }
 
+// --- Lati curvi accanto ai raccordi -----------------------------------------
+// La prima volta che un raccordo accorcia un lato curvo, salviamo nel
+// contrassegno la forma intera del lato, da spigolo S a spigolo E, come
+// scostamenti delle maniglie da S ed E. Ogni cambio di raggio ritaglia quel
+// lato originale: la bombatura non si perde, anche con coordinate intere.
+
+function sideAttrs(F) {
+  const r2 = (v) => Math.round(v * 100) / 100;
+  return {
+    [`${FILLET_TAG}.s1x`]: r2(F[1].x - F[0].x),
+    [`${FILLET_TAG}.s1y`]: r2(F[1].y - F[0].y),
+    [`${FILLET_TAG}.s2x`]: r2(F[2].x - F[3].x),
+    [`${FILLET_TAG}.s2y`]: r2(F[2].y - F[3].y),
+  };
+}
+
+function distToCurve(F, p) {
+  return vlen(sub(cubicPoint(F, nearestParam(F, p, -0.15, 1.15)), p));
+}
+
+// Lato originale salvato, se è coerente con la curva attuale P e con gli spigoli S, E
+function storedSide(P, S, E, attrs) {
+  const k = (n) => attrs?.[`${FILLET_TAG}.${n}`];
+  if (![k("s1x"), k("s1y"), k("s2x"), k("s2y")].every(Number.isFinite)) return null;
+  const F = [xy(S), { x: S.x + k("s1x"), y: S.y + k("s1y") }, { x: E.x + k("s2x"), y: E.y + k("s2y") }, xy(E)];
+  const tol = Math.max(2, 0.02 * vlen(sub(E, S)));
+  if (distToCurve(F, P[0]) > tol || distToCurve(F, P[3]) > tol) return null;
+  return F;
+}
+
+// Lato intero da S a E: quello salvato, oppure ricostruito dalla curva attuale
+function fullSide(P, S, E, attrs) {
+  const stored = storedSide(P, S, E, attrs);
+  if (stored) return stored;
+  let F = P.map(xy);
+  if (vlen(sub(E, F[3])) > EPS) F = adjustCurveEnd(F, E, 0);
+  if (vlen(sub(S, F[0])) > EPS) F = adjustCurveStart(F, S, 0);
+  return F;
+}
+
+// Spigolo di ogni raccordo del contorno, per indice del suo nodo A e del nodo B
+function contourCornerMap(info) {
+  const map = new Map();
+  info.segments.forEach((seg, k) => {
+    if (seg.kind !== "cubic") return;
+    const tagged = seg.offs.some((i) => info.pts[i].attrs?.[FILLET_TAG]);
+    const g = filletGeometry(info, k, true) || (tagged ? filletGeometry(info, k, false) : null);
+    if (!g) return;
+    map.set(g.iA, g.V);
+    map.set(g.iB, g.V);
+  });
+  return map;
+}
+
+// Sposta la fine di una curva (P[3]) in modo che tra la nuova fine e lo
+// spigolo V resti la distanza d misurata lungo il lato.
+function adjustCurveEnd(P, V, d) {
+  const A = P[3];
+  // 1) se il prolungamento del polinomio arriva davvero allo spigolo (curve
+  //    con coordinate non arrotondate), è il modo esatto
+  const tV = findParamFor(P, V, 0.5, 7, 0.5);
+  if (tV !== null && tV >= 1 - 1e-6) {
+    const table = arcTable(P, 0, tV);
+    return subCubic(P, 0, tAtArc(table, Math.max(0, table.total - d)));
+  }
+  const gap = vlen(sub(V, A));
+  if (d >= gap) {
+    // 2) raggio più grande: si taglia dentro la curva (esatto)
+    const table = arcTable(P, 0, 1);
+    return subCubic(P, 0, tAtArc(table, Math.max(0, table.total - (d - gap))));
+  }
+  // 3) raggio più piccolo: la fine scivola verso lo spigolo e la curva viene
+  //    "stirata" lungo la sua corda, così la bombatura del lato resta la stessa
+  const u = norm(sub(V, A)) || endTangent(P);
+  if (!u) return P.map(xy);
+  const A2 = add(A, mul(u, gap - d));
+  return stretchCurve(P, A2);
+}
+
+// Trasforma la curva in modo che la fine passi da P[3] ad A2 tenendo fermo
+// l'inizio: le distanze lungo la corda si allungano, quelle perpendicolari
+// (la bombatura) restano uguali.
+function stretchCurve(P, A2) {
+  const c0 = P[0];
+  const chord = sub(P[3], c0);
+  const L = vlen(chord);
+  const newChord = sub(A2, c0);
+  const L2 = vlen(newChord);
+  if (L < EPS || L2 < EPS) {
+    const delta = sub(A2, P[3]);
+    return [xy(P[0]), xy(P[1]), add(P[2], delta), xy(A2)];
+  }
+  const e = mul(chord, 1 / L);
+  const n = { x: -e.y, y: e.x };
+  const e2 = mul(newChord, 1 / L2);
+  const n2 = { x: -e2.y, y: e2.x };
+  const scale = L2 / L;
+  const map = (p) => {
+    const v = sub(p, c0);
+    return add(c0, add(mul(e2, dot(v, e) * scale), mul(n2, dot(v, n))));
+  };
+  return [xy(P[0]), map(P[1]), map(P[2]), xy(A2)];
+}
+
+function adjustCurveStart(P, V, d) {
+  return adjustCurveEnd([...P].reverse(), V, d).reverse();
+}
+
 // Cambia il raggio dei raccordi indicati (indice locale del nodo A) in un
 // contorno. Restituisce { contour, skipped } con lo stesso numero di punti.
 export function refilletContour(contour, filletAIndices, opts) {
@@ -803,6 +1046,7 @@ export function refilletContour(contour, filletAIndices, opts) {
   }
 
   // segmenti vicini ai raccordi: inizio e/o fine "agganciati" a uno spigolo V
+  let cornerMap = null;
   const adj = new Map();
   const slot = (s) => {
     if (!adj.has(s)) adj.set(s, { start: null, end: null });
@@ -820,21 +1064,7 @@ export function refilletContour(contour, filletAIndices, opts) {
     a.kind = seg.kind;
     // una curva lunga zero (es. un raccordo con raggio 0 accanto) si tratta come un tratto dritto
     if (seg.kind === "cubic" && isDegenerateSegment(P)) a.kind = "line-degenerate";
-    if (a.kind === "cubic") {
-      a.P = P;
-      a.t0 = 0;
-      a.t1 = 1;
-      if (a.start) {
-        const t = findParamFor(P, a.start.V, -6, 0.5, extensionTolerance(P, a.start.V, 0));
-        if (t === null) a.start.bad = "curve-start";
-        else a.t0 = t;
-      }
-      if (a.end) {
-        const t = findParamFor(P, a.end.V, 0.5, 7, extensionTolerance(P, a.end.V, 3));
-        if (t === null) a.end.bad = "curve-end";
-        else a.t1 = t;
-      }
-    } else if (a.kind !== "line" && a.kind !== "line-degenerate") {
+    if (a.kind !== "cubic" && a.kind !== "line" && a.kind !== "line-degenerate") {
       if (a.start) a.start.bad = "other-seg";
       if (a.end) a.end.bad = "other-seg";
     }
@@ -849,9 +1079,16 @@ export function refilletContour(contour, filletAIndices, opts) {
       a.p1 = a.end ? a.end.V : a.P[a.P.length - 1];
       a.L = vlen(sub(a.p1, a.p0));
     } else if (a.kind === "cubic") {
-      if (!a.start) a.t0 = 0;
-      if (!a.end) a.t1 = 1;
-      a.table = arcTable(a.P, a.t0, a.t1);
+      // lato intero da spigolo a spigolo (salvato o ricostruito)
+      if (!cornerMap) cornerMap = contourCornerMap(info);
+      const S = a.start ? a.start.V : cornerMap.get(a.seg.a) ?? a.P[0];
+      const E = a.end ? a.end.V : cornerMap.get(a.seg.b) ?? a.P[3];
+      a.F = fullSide(a.P, S, E, info.pts[a.seg.offs[0]].attrs);
+      // tratto utilizzabile: dagli spigoli dei raccordi coinvolti, o dalle
+      // estremità attuali dove il raccordo vicino non cambia
+      a.tLo = a.start ? 0 : nearestParam(a.F, a.P[0], -0.15, 1.15);
+      a.tHi = a.end ? 1 : nearestParam(a.F, a.P[3], -0.15, 1.15);
+      a.table = arcTable(a.F, a.tLo, Math.max(a.tLo, a.tHi));
       a.L = a.table.total;
     } else {
       a.L = 0;
@@ -884,11 +1121,15 @@ export function refilletContour(contour, filletAIndices, opts) {
         a.end.dirIn2 = dir || a.end.dirIn;
       }
     } else if (a.kind === "cubic") {
-      const ta = a.start ? tAtArc(a.table, a.start.dEff) : a.t0;
-      const tb = a.end ? tAtArc(a.table, a.L - a.end.dEff) : a.t1;
-      const Q = subCubic(a.P, ta, Math.max(ta, tb));
+      const t0 = a.start ? tAtArc(a.table, a.start.dEff) : a.tLo;
+      const t1 = a.end ? tAtArc(a.table, a.L - a.end.dEff) : a.tHi;
+      const Q = subCubic(a.F, t0, Math.max(t0, t1));
+      // estremità che non cambiano restano esattamente dove sono
+      if (!a.start) Q[0] = xy(a.P[0]);
+      if (!a.end) Q[3] = xy(a.P[3]);
       setPoint(a.seg.offs[0], Q[1]);
       setPoint(a.seg.offs[1], Q[2]);
+      out[a.seg.offs[0]].attrs = { ...(out[a.seg.offs[0]].attrs || {}), ...sideAttrs(a.F) };
       if (a.start) {
         a.start.B2 = Q[0];
         a.start.dirOut2 = startTangent(Q) || a.start.dirOut;
@@ -918,6 +1159,10 @@ export function refilletContour(contour, filletAIndices, opts) {
     setPoint(g.ih1, h1);
     setPoint(g.ih2, h2);
     setPoint(g.iB, g.B2);
+    const rApplied = g.dEff / Math.tan(Math.min(g.phi, MAX_ANGLE) / 2);
+    const attrs = tagAttrs(rApplied, g.k, g.V, out[g.iA], g.phi);
+    out[g.ih1].attrs = { ...(out[g.ih1].attrs || {}), ...attrs };
+    out[g.ih2].attrs = { ...(out[g.ih2].attrs || {}), ...attrs };
     out[g.iA].smooth = live;
     out[g.iB].smooth = live;
     if (!live) {
@@ -1169,7 +1414,7 @@ class AngoliPanel extends HTMLElement {
 
         <label class="check"><input type="checkbox" data-key="allMasters" /> Stesso raggio in tutti i master</label>
         <div class="hint" id="masters-hint"></div>
-        <label class="check"><input type="checkbox" data-key="keepTension" /> Mantieni la tensione degli angoli già arrotondati</label>
+        <label class="check"><input type="checkbox" data-key="keepTension" /> Mantieni la tensione degli angoli già arrotondati (finché non sposti lo slider della tensione)</label>
         <label class="check"><input type="checkbox" data-key="roundCoords" /> Coordinate intere</label>
         <label class="check"><input type="checkbox" data-key="preview" /> Anteprima sul canvas</label>
 
@@ -1270,6 +1515,10 @@ class AngoliPlugin {
     this.busy = false;
     this.radiusMax = 300; // fondo scala dello slider, adattato agli angoli coinvolti
     this.radiusHint = "";
+    // true quando hai spostato lo slider della tensione: da lì in poi la
+    // tensione del pannello vale anche per gli angoli già arrotondati
+    this.tensionDirty = false;
+    this._syncKey = null;
 
     this.panel = document.createElement(PANEL_TAG);
     this.panel.setup(this, `${pluginPath}/icon.svg`);
@@ -1301,7 +1550,10 @@ class AngoliPlugin {
 
   setSetting(key, value) {
     if (key === "radius") value = Math.max(0, value);
-    if (key === "tension") value = clamp(value, 0, 3);
+    if (key === "tension") {
+      value = clamp(value, 0, 3);
+      if (!this._syncing) this.tensionDirty = true;
+    }
     this.settings = { ...this.settings, [key]: value };
     saveSettings(this.settings);
     this.panel.renderSettings(this.settings);
@@ -1353,7 +1605,7 @@ class AngoliPlugin {
       radius: this.settings.radius,
       tension: this.settings.tension,
       roundCoords: this.settings.roundCoords,
-      keepTension: this.settings.keepTension,
+      keepTension: this.settings.keepTension && !this.tensionDirty,
     };
   }
 
@@ -1396,15 +1648,11 @@ class AngoliPlugin {
       );
       return;
     }
-    if (this._flash && Date.now() < this._flash.until) {
-      this.panel.setStatus(this._flash.text, this._flash.warn);
-      this.panel.setButtonsEnabled(!this.busy, true);
-      return;
-    }
+    const flashing = this._flash && Date.now() < this._flash.until;
     const positioned = this.getPositionedGlyph();
     const path = positioned?.glyph?.path;
     if (!path) {
-      this.panel.setStatus("Seleziona un glifo da modificare.");
+      this.panel.setStatus(flashing ? this._flash.text : "Seleziona un glifo da modificare.", flashing && this._flash.warn);
       this.panel.setButtonsEnabled(false, false);
       return;
     }
@@ -1418,7 +1666,15 @@ class AngoliPlugin {
       this.panel.setButtonsEnabled(false, false);
       return;
     }
+    // anche mentre è visibile il messaggio "Fatto…", raggio e tensione nel
+    // pannello seguono subito la nuova selezione
     this.updateRadiusRange(path, corners, fillets);
+    this.syncFromSelection(corners, fillets);
+    if (flashing) {
+      this.panel.setStatus(this._flash.text, this._flash.warn);
+      this.panel.setButtonsEnabled(!this.busy && corners.length + fillets.length > 0, true);
+      return;
+    }
     const total = corners.length + fillets.length;
     const lines = [];
     if (corners.length) {
@@ -1448,6 +1704,33 @@ class AngoliPlugin {
     }
     this.panel.setStatus(text, !total);
     this.panel.setButtonsEnabled(total > 0 && !this.busy, true);
+  }
+
+  // Quando cambia la selezione, raggio e tensione nel pannello mostrano i
+  // valori attuali degli angoli arrotondati selezionati (come in Illustrator)
+  syncFromSelection(corners, fillets) {
+    if (this.drag || this.busy) return;
+    const glyphName = this.sceneController.sceneModel.getSelectedGlyphName?.() || "";
+    const key = `${glyphName}:${corners.map((c) => c.abs).join(",")}:${fillets.map((f) => f.absA).join(",")}`;
+    if (key === this._syncKey) return;
+    this._syncKey = key;
+    this.tensionDirty = false;
+    if (!fillets.length) return;
+    const radii = fillets.map((f) => f.radius);
+    const tensions = fillets.map((f) => f.tension).filter((t) => Number.isFinite(t));
+    this._syncing = true;
+    try {
+      if (Math.max(...radii) - Math.min(...radii) <= 0.5) {
+        this.settings = { ...this.settings, radius: Math.round(radii[0] * 10) / 10 };
+      }
+      if (tensions.length && Math.max(...tensions) - Math.min(...tensions) <= 0.02) {
+        this.settings = { ...this.settings, tension: Math.round(tensions[0] * 100) / 100 };
+      }
+      saveSettings(this.settings);
+      this.panel.renderSettings(this.settings);
+    } finally {
+      this._syncing = false;
+    }
   }
 
   // Spiega perché i punti selezionati non danno nessun angolo da modificare
